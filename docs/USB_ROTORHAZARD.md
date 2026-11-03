@@ -3,9 +3,10 @@
 Firmware `1.2.0` and later exposes eight native RotorHazard serial
 nodes over the C5's USB port. It needs no S3, Wi-Fi connection, FPVGate plugin
 or split-timer/Sensor Tuning PR. Software tests pass and native USB discovery
-has been verified on a Waveshare C5-Zero, with timing reported working in
-local RH testing. XIAO USB, multi-pilot RF detection and timing accuracy
-against video still need validation.
+has been verified on a Waveshare C5-Zero and a Seeed XIAO ESP32-C5, and the
+XIAO has timed flown heats on a Raspberry Pi 5 alongside RX5808 nodes (see
+Checks). Two or more pilots flying at once, and timing accuracy against video,
+still need validation.
 
 ## Setup
 
@@ -180,6 +181,36 @@ R1-R8 frequencies and live RSSI 28-31. A local RH server was then switched to
 this USB receiver, preserving the R6 pilot assignment and two-minute heat.
 The tester reported it working. This does not establish RF rate, gate-pass
 accuracy against video, USB reconnection or XIAO behaviour.
+
+Flight checks on 2026-11-03: a XIAO ESP32-C5 (ESP32-C5HR8) on a Raspberry Pi 5
+with RH 4.4.0 and 4.5.0, discovered at the first attempt on every server start.
+One quad flew Raceband/Fatshark F1 laps of about 13-18 s through one gate,
+timed at the same time by the C5 and by a NuclearHazard board (STM32 +
+RX5808) on the same Pi, both as RH nodes on the same frequencies.
+
+- The C5 needs shielding like the RX5808s it replaces. With its antenna out
+  in the open it heard the quad all round the track: the off-gate level
+  (median) was 80, its highest 134, against gate peaks of 134-146, so no
+  EnterAt separated passes from the rest of the lap. In the timer's metal case
+  (half open) the off-gate median fell to 44-49 with the gate peaks unchanged.
+- With the case and the 255 ms median, a heat RH timed as 5 laps on the C5,
+  with no extra or missed passes; the RX5808 node on the same frequency counted
+  one extra pass (a peak at exactly its EnterAt). Lowest gate peak against the
+  highest off-gate level: C5 137 / 101, RX5808 124 / 104 (each on its own
+  scale). Pass times of the two receivers differed by -317 to +364 ms per
+  pass, varying from pass to pass, so lap times differed by up to 0.7 s; which
+  receiver is nearer the truth needs video.
+- Marshal's recalculated passes matched the C5's own within 1 ms on a real
+  heat (up to 58 ms before history was sent as turning points).
+- Neighbouring Raceband/Fatshark channels (R2, F1, R4, R5) did not see each
+  other: with F1 on at the gate, R4 stayed at its floor (34.7 against 35.3 with
+  the VTX off), although F1 sits 9 MHz from R4's image.
+- Scan rate does not change what RH sees. With 8, 4 and 1 seats on (about 1040,
+  2060 and 7850 Hz per seat), the reported floor and a steady VTX level moved
+  less than the same setup drifted over a few minutes, in no consistent
+  direction. Turning seats off in RH needs no new thresholds for this reason.
+- The integration tests below also pass against the UDGP fork of RH 4.4.0 on
+  the Pi.
 
 Before deploying, use a spare C5 to check discovery, all eight graphs,
 frequency/threshold readback, deliberate gate passes, unplug/replug and

@@ -232,8 +232,8 @@ them, about 1000 readings a second each. Boscam E7 and E8 are out of range.
 
 **Does it work with RotorHazard?**
 Yes, from 1.2.0. Plug the C5 into the RotorHazard computer over USB and it
-appears as eight standard RH nodes. Verified on the Waveshare C5-Zero; XIAO
-USB validation is pending. See [docs/USB_ROTORHAZARD.md](docs/USB_ROTORHAZARD.md).
+appears as eight standard RH nodes. Verified on the Waveshare C5-Zero and,
+on a Raspberry Pi 5, the XIAO ESP32-C5. See [docs/USB_ROTORHAZARD.md](docs/USB_ROTORHAZARD.md).
 
 **Which boards are supported?**
 The Waveshare ESP32-C5-Zero and Seeed Studio XIAO ESP32-C5 are tested.

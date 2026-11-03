@@ -28,6 +28,12 @@ check which antenna your board selects by default. The C5-Zero was tested
 with its default antenna path, and the XIAO ESP32-C5 (which has no antenna
 switch) with an external antenna on its connector.
 
+At a gate, put the C5 where an RX5808 node board would go: in a metal case or
+behind shielding that leaves it hearing mainly the gate. An open antenna hears
+the quad all round the track, and the off-gate level can reach the gate peaks;
+a half-open metal case lowered the off-gate median by about 8 dB with the gate
+peaks unchanged ([USB_ROTORHAZARD.md](USB_ROTORHAZARD.md#checks)).
+
 ### Power and wiring
 
 The C5 needs power and ground, plus two UART lines to the host:

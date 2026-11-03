@@ -55,8 +55,8 @@ can receive the application update through FPVGate. Direct USB users should
 close RH's serial connection before flashing. Do not use RH's STM32 node
 updater on a C5.
 
-Both boards have built binaries. Waveshare USB discovery and local timing
-have been tested; physical XIAO USB validation is pending. See
+Both boards have built binaries. USB discovery and timing in RH have been
+tested on both boards (the XIAO on a Raspberry Pi 5 with 1.2.3). See
 [1.2.3 release notes](RELEASE_NOTES.md) for the validation scope.
 
 `SHA256SUMS.txt` contains hashes using the board-prefixed GitHub asset names.
