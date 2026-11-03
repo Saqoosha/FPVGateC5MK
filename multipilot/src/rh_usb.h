@@ -80,6 +80,10 @@ public:
     unsigned smooth() const { return smoothMs_; }
 
 private:
+    struct Extremum {
+        uint8_t level = 0;
+        uint32_t firstMs = 0, lastMs = 0;
+    };
     struct Seat {
         uint16_t frequency = 0;
         uint8_t enter = 90, exit = 80, rssi = 1;
@@ -87,12 +91,17 @@ private:
         bool crossing = false, sampled = false;
         uint32_t firstPeakMs = 0, lastPeakMs = 0, passMs = 0, sampleMs = 0;
         uint16_t loopUs = 0;
-        // Highest and lowest level since RH's last poll, for its RSSI history:
-        // it polls a few times a second, the scan samples ~1000 times. 'shown'
-        // is the extremum reported last.
-        bool windowed = false;
-        uint8_t windowMax = 0, windowMin = 0, shown = 0;
-        uint32_t maxFirstMs = 0, maxLastMs = 0, minFirstMs = 0, minLastMs = 0;
+        // RSSI history, as RH's own nodes keep it (RssiNode.cpp): a peak is
+        // where the level turns from rising to falling, a nadir the reverse.
+        // Each waits in its own one-entry queue for RH's next poll, which takes
+        // the older of the two; a queued peak is replaced by a higher one and
+        // merged with an equal one (a nadir: lower, equal), so a pass's top
+        // plateau keeps its first and last times between polls.
+        bool historyStarted = false, peakPending = false, nadirPending = false;
+        bool peakQueued = false, nadirQueued = false;
+        uint8_t lastLevel = 0;
+        int8_t lastDirection = 0;  // of the last change: 1 up, -1 down, 0 none yet
+        Extremum peakNow, nadirNow, peakSend, nadirSend;
         // Rolling maximum for the RSSI RH shows: the highest sample in each
         // kShowBucketMs bucket, and which bucket (sample ms / kShowBucketMs).
         uint8_t bucketMax[kShowBuckets] = {};
@@ -136,6 +145,11 @@ private:
     static uint8_t shownRssi(const Seat& seat, uint32_t nowMs);
     // A level for RH's RSSI and history, sampled from firstMs to lastMs.
     static void show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs);
+    // History: one level at one time (see Seat::peakNow).
+    static void track(Seat& seat, uint8_t level, uint32_t ms);
+    // Queues a pending peak or nadir; 'force' merges it into a full queue.
+    static void queuePeak(Seat& seat, bool force);
+    static void queueNadir(Seat& seat, bool force);
     // Crossings and laps; may hold a jump back from show (see Reject).
     void detect(Seat& seat, uint8_t level, uint32_t sampleMs);
     static void stopCrossing(Seat& seat) { seat.crossing = seat.held = seat.shownCrossing = seat.jumping = false; }

@@ -83,10 +83,18 @@ actually want its extra race seats. The direct C5 does not use the plugin.
   RH's Capture averages this value, so captured levels come out a few counts
   higher than with 1.2.1 (on the safe side). Crossing detection still uses
   every sample.
-- For RH's RSSI history (Marshal), each poll also reports one extremum of the
-  samples since the previous poll, at its own sample times: the peak if it rose
-  further from the extremum reported last than the nadir fell, otherwise the
-  nadir. The full 1 kHz trace is not transferred.
+- For RH's RSSI history (Marshal), the C5 keeps turning points as RH's own
+  nodes do (`RssiNode.cpp`): a peak where the smoothed level turns from rising
+  to falling, a nadir the reverse, each with its first and last sample times.
+  Each waits in a one-entry queue; a poll takes the older of the two, a queued
+  peak is replaced by a higher one or merged with an equal one (nadirs: lower,
+  equal), and a poll with nothing queued sends level 0, which RH skips.
+  Reporting a level at every poll, as 1.2.3 did, put mid-plateau points into
+  the history; RH folds a third equal value into the previous one, so the
+  plateau's real start was lost and Marshal's recalculated pass moved by up to
+  58 ms on a real heat. With turning points only, recalculated and live pass
+  times agree within 1 ms (a replay of a recorded flight at 80-200 ms poll
+  intervals, and a five-lap heat). The full 1 kHz trace is not transferred.
 - After any frequency change no crossing starts for 100 ms, and NodePeak and
   NodeNadir ignore those samples: the scan restarts with empty filters, and a
   lone settling sample could otherwise blip the crossing flag or count a pass.

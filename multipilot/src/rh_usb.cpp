@@ -105,7 +105,11 @@ void Core::latchStats(uint32_t nowMs) {
     if (stale) {
         stopCrossing(seat);
         seat.rssi = 1;
-        seat.windowed = false;
+        // Turning points restart with the next sample, so none spans the gap;
+        // those already found are still sent.
+        queuePeak(seat, true);
+        queueNadir(seat, true);
+        seat.historyStarted = false;
     }
     stats_[0] = seat.lap;
     put16(stats_ + 1, boundedAge(nowMs, seat.passMs));
@@ -119,25 +123,27 @@ void Core::latchStats(uint32_t nowMs) {
     stats_[8] = seat.crossing || seat.shownCrossing ? 1 : 0;
     stats_[9] = seat.passNadir;
     stats_[10] = seat.nadir;
-    // History: one extremum of the samples since the last poll, at its actual
-    // sample times, as RH's own nodes report it: the peak if it rose further
-    // from the extremum shown last than the nadir fell, else the nadir. A
-    // short pass between polls then reaches RH's graph at its true height.
-    if (seat.windowed) {
-        bool peak = seat.windowMax - seat.shown >= seat.shown - seat.windowMin;
-        uint32_t firstMs = peak ? seat.maxFirstMs : seat.minFirstMs;
-        uint32_t lastMs = peak ? seat.maxLastMs : seat.minLastMs;
-        seat.shown = peak ? seat.windowMax : seat.windowMin;
+    // History: the older of the queued peak and nadir, at its actual sample
+    // times, as RH's own nodes report it (see Seat::peakNow). One that is
+    // waiting for a free queue gets it now, even if no sample has come since.
+    queuePeak(seat, false);
+    queueNadir(seat, false);
+    bool peak = seat.peakQueued && (!seat.nadirQueued || seat.peakSend.firstMs < seat.nadirSend.firstMs);
+    if (peak || seat.nadirQueued) {
+        const Extremum& e = peak ? seat.peakSend : seat.nadirSend;
         if (peak) stats_[8] |= 2;
-        stats_[11] = seat.shown;
-        put16(stats_ + 12, boundedAge(nowMs, firstMs));
-        put16(stats_ + 14, boundedAge(lastMs, firstMs));  // how long it held
-        seat.windowed = false;
+        stats_[11] = e.level;
+        put16(stats_ + 12, boundedAge(nowMs, e.firstMs));
+        put16(stats_ + 14, boundedAge(e.lastMs, e.firstMs));  // how long it held
+        (peak ? seat.peakQueued : seat.nadirQueued) = false;
     } else {
-        // No samples since the last poll: the latest (or stale) level.
-        stats_[8] |= 2;
-        stats_[11] = seat.rssi;
-        put16(stats_ + 12, boundedAge(nowMs, seat.sampleMs));
+        // Nothing queued: level 0, which RH skips, as its own nodes send. A
+        // current level here would be wrong later: RH folds a third equal
+        // value into the last one (PeakNadirHistory._addEntry), so a level
+        // sent mid-plateau would replace the start of that plateau's peak
+        // when it arrives, and Marshal's recalculated pass would move.
+        stats_[11] = 0;
+        put16(stats_ + 12, 0);
         put16(stats_ + 14, 0);
     }
 }
@@ -294,27 +300,8 @@ void Core::process(Seat& seat, uint8_t level, uint32_t sampleMs) {
 
 void Core::show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs) {
     seat.rssi = level;
-    if (!seat.windowed) {
-        seat.windowed = true;
-        seat.windowMax = seat.windowMin = level;
-        seat.maxFirstMs = seat.minFirstMs = firstMs;
-        seat.maxLastMs = seat.minLastMs = lastMs;
-    } else {
-        if (level > seat.windowMax) {
-            seat.windowMax = level;
-            seat.maxFirstMs = firstMs;
-            seat.maxLastMs = lastMs;
-        } else if (level == seat.windowMax) {
-            seat.maxLastMs = lastMs;
-        }
-        if (level < seat.windowMin) {
-            seat.windowMin = level;
-            seat.minFirstMs = firstMs;
-            seat.minLastMs = lastMs;
-        } else if (level == seat.windowMin) {
-            seat.minLastMs = lastMs;
-        }
-    }
+    track(seat, level, firstMs);
+    if (lastMs != firstMs) track(seat, level, lastMs);
     uint32_t bucket = firstMs / kShowBucketMs;
     unsigned slot = bucket % kShowBuckets;
     // A held jump is shown late, at its own time: never over a newer bucket.
@@ -326,6 +313,66 @@ void Core::show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs) {
     } else if (level > seat.bucketMax[slot]) {
         seat.bucketMax[slot] = level;
     }
+}
+
+void Core::track(Seat& seat, uint8_t level, uint32_t ms) {
+    if (!seat.historyStarted) {
+        seat.historyStarted = true;
+        seat.lastLevel = level;
+        seat.lastDirection = 0;
+        seat.peakNow = seat.nadirNow = Extremum{level, ms, ms};
+        return;
+    }
+    int change = (int)level - seat.lastLevel;
+    seat.lastLevel = level;
+    // Turning points follow the last direction the level moved in, so a flat
+    // stretch is part of the peak or nadir before it, not a turn of its own.
+    if (change > 0) {
+        queuePeak(seat, true);  // a peak still waiting must not be lost
+        seat.peakNow = Extremum{level, ms, ms};
+        if (seat.lastDirection <= 0) seat.nadirPending = true;  // turned up: nadirNow was the bottom
+        seat.lastDirection = 1;
+    } else if (change < 0) {
+        queueNadir(seat, true);
+        seat.nadirNow = Extremum{level, ms, ms};
+        if (seat.lastDirection >= 0) seat.peakPending = true;   // turned down: peakNow was the top
+        seat.lastDirection = -1;
+    } else {
+        if (seat.lastDirection >= 0) seat.peakNow.lastMs = ms;
+        if (seat.lastDirection <= 0) seat.nadirNow.lastMs = ms;
+    }
+    queuePeak(seat, false);
+    queueNadir(seat, false);
+}
+
+void Core::queuePeak(Seat& seat, bool force) {
+    if (!seat.peakPending) return;
+    if (!seat.peakQueued) {
+        seat.peakSend = seat.peakNow;
+        seat.peakQueued = true;
+    } else if (!force) {
+        return;  // wait for RH to take the queued one
+    } else if (seat.peakNow.level > seat.peakSend.level) {
+        seat.peakSend = seat.peakNow;
+    } else if (seat.peakNow.level == seat.peakSend.level) {
+        seat.peakSend.lastMs = seat.peakNow.lastMs;
+    }
+    seat.peakPending = false;
+}
+
+void Core::queueNadir(Seat& seat, bool force) {
+    if (!seat.nadirPending) return;
+    if (!seat.nadirQueued) {
+        seat.nadirSend = seat.nadirNow;
+        seat.nadirQueued = true;
+    } else if (!force) {
+        return;
+    } else if (seat.nadirNow.level < seat.nadirSend.level) {
+        seat.nadirSend = seat.nadirNow;
+    } else if (seat.nadirNow.level == seat.nadirSend.level) {
+        seat.nadirSend.lastMs = seat.nadirNow.lastMs;
+    }
+    seat.nadirPending = false;
 }
 
 void Core::detect(Seat& seat, uint8_t level, uint32_t sampleMs) {

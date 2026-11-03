@@ -142,8 +142,8 @@ void tests() {
     CHECK(read(core, port, 0x05, rhusb::kSettleMs + 512)[0] == 0);
 }
 
-// RSSI history: RH polls a few times a second, so each poll reports one
-// extremum of the samples since the last one, as RH's own nodes do.
+// RSSI history: RH polls a few times a second and each poll takes one
+// turning point, the older of the queued peak and nadir, as RH's own nodes do.
 void historyTests() {
     Port port;
     rhusb::Core core(port);
@@ -161,27 +161,61 @@ void historyTests() {
     auto held = [](const std::vector<uint8_t>& e) { return e[6] * 256 + e[7]; };
     for (uint32_t t = 0; t < 50; ++t) core.sample(2, 120, t);  // floor: 30
     auto e = poll(50);
-    CHECK(level(e) == 30);
-    // A pass lasting 3 ms between polls reaches RH at its peak and time.
+    CHECK(level(e) == 0);  // no turning point yet: nothing for RH's history (0 is skipped)
+    // A 3 ms pass at 70 ms: the floor before it is a nadir, the pass a peak.
     for (uint32_t t = 50; t < 100; ++t) core.sample(2, t >= 70 && t < 73 ? 440 : 120, t);
     e = poll(100);
-    CHECK((e[0] & 2) && level(e) == 110);
-    CHECK(since(e) == 30 && held(e) == 2);  // 440 at 70..72
-    // The quiet window after it comes back down as a nadir.
+    CHECK(!(e[0] & 2) && level(e) == 30 && since(e) == 100 && held(e) == 69);  // 30 at 0..69, older
+    // A 1 ms dip at 120 ms; the pass waits its turn and keeps its times.
     for (uint32_t t = 100; t < 150; ++t) core.sample(2, t == 120 ? 100 : 120, t);
     e = poll(150);
-    CHECK(!(e[0] & 2) && level(e) == 25 && since(e) == 30 && held(e) == 0);
-    // Then a rise is a peak again.
+    CHECK((e[0] & 2) && level(e) == 110 && since(e) == 80 && held(e) == 2);  // 440 at 70..72
     for (uint32_t t = 150; t < 200; ++t) core.sample(2, 160, t);
     e = poll(200);
-    CHECK((e[0] & 2) && level(e) == 40 && held(e) == 49);
-    // No samples since the last poll: the latest level, as before.
+    CHECK(!(e[0] & 2) && level(e) == 25 && since(e) == 80 && held(e) == 0);  // the dip
+    // Still rising (to 40 at 150 ms), so no turning point: nothing.
     e = poll(250);
-    CHECK((e[0] & 2) && level(e) == 40 && since(e) == 51 && held(e) == 0);
+    CHECK(level(e) == 0);
     // READ_LAP_STATS carries the same history in bytes 8-15.
     for (uint32_t t = 250; t < 300; ++t) core.sample(2, t == 260 ? 600 : 160, t);
     auto stats = read(core, port, 0x05, 300);
     CHECK((stats[8] & 2) && stats[11] == 150 && stats[3] == 150);  // shown: the 260 ms peak
+
+    // Between two polls a peak and then a deeper fall: both reach RH, in order.
+    // (Before, one extremum per poll was kept and the other dropped.)
+    for (uint32_t t = 300; t < 400; ++t) core.sample(2, t >= 310 && t < 313 ? 440 : t >= 330 && t < 340 ? 40 : 160, t);
+    e = poll(400);
+    CHECK(!(e[0] & 2) && level(e) == 40 && since(e) == 139 && held(e) == 48);  // the floor at 261..309
+    e = poll(450);
+    CHECK((e[0] & 2) && level(e) == 110 && since(e) == 140 && held(e) == 2);  // 440 at 310..312
+    e = poll(500);
+    CHECK(!(e[0] & 2) && level(e) == 10 && since(e) == 170 && held(e) == 9);  // 40 at 330..339
+
+    // Two equal peaks while one is queued merge, so the plateau spans both.
+    for (uint32_t t = 500; t < 600; ++t)
+        core.sample(2, (t >= 510 && t < 513) || (t >= 530 && t < 533) ? 440 : t == 560 ? 200 : 160, t);
+    std::vector<std::vector<uint8_t>> seen;
+    for (uint32_t now = 600; now <= 800; now += 50) seen.push_back(poll(now));
+    bool merged = false;
+    for (auto& h : seen) merged |= (h[0] & 2) && level(h) == 110 && held(h) == 22;  // 510..532
+    CHECK(merged);
+
+    // A poll in the middle of a pass's top plateau sends nothing; the whole
+    // plateau follows once it ends. (A mid-plateau level made RH fold the
+    // plateau's real first time away, and Marshal's recalc moved the pass.)
+    for (uint32_t t = 800; t < 900; ++t) core.sample(2, 120, t);
+    while (level(poll(900)) != 0) {}
+    for (uint32_t t = 900; t < 1000; ++t) core.sample(2, t < 945 ? 120 : 520, t);  // 130 from 945
+    e = poll(1000);
+    CHECK(!(e[0] & 2));  // the floor before it at most, never 130
+    for (uint32_t t = 1000; t < 1100; ++t) core.sample(2, t < 1002 ? 520 : 120, t);  // ends at 1001
+    std::vector<std::vector<uint8_t>> after;
+    for (uint32_t now = 1100; now <= 1200; now += 50) after.push_back(poll(now));
+    bool plateau = false;
+    for (size_t i = 0; i < after.size(); ++i)
+        plateau |= (after[i][0] & 2) && level(after[i]) == 130 && since(after[i]) == 1100 + 50 * i - 945 &&
+                   held(after[i]) == 56;  // 945..1001
+    CHECK(plateau);
 }
 
 // The RSSI RH shows (its live graph, a point every ~200 ms) holds each peak
@@ -293,7 +327,7 @@ void rejectTests() {
     run(30, 600);
     run(30, 120);
     auto after = read(core, port, 0x05, t);
-    CHECK(after[3] == 30 && after[4] == 30 && after[11] == 30);  // RSSI, node peak, history
+    CHECK(after[3] == 30 && after[4] == 30 && after[11] == 0);  // RSSI, node peak, no history point
     run(270, 120);
     CHECK(laps() == before);
     CHECK(read(core, port, 0x05, t)[5] == 1);  // pass peak untouched

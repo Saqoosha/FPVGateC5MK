@@ -147,7 +147,9 @@ class RotorHazardUsbTest(unittest.TestCase):
                 self.serial.sample(5, 440 if 1020 <= now < 1023 else 120, now)
             self.serial.now = 1050
             self.interface.update()
-        self.assertIn(110, node.history_values)  # the pass in between, for Marshal
+        # History takes turning points oldest first, as RH's own nodes send
+        # them: this poll gets the floor before the pass, the next one the pass.
+        self.assertNotIn(110, node.history_values)
         # The live graph plots current_rssi every ~200 ms: it holds the pass for ~250 ms.
         self.assertEqual(node.current_rssi, 110)
         with patch.object(serial_node, 'monotonic', return_value=50):
@@ -155,6 +157,9 @@ class RotorHazardUsbTest(unittest.TestCase):
                 self.serial.sample(5, 120, now)
             self.serial.now = 1300
             self.interface.update()
+        self.assertIn(110, node.history_values)  # the pass in between, for Marshal
+        i = node.history_values.index(110)
+        self.assertAlmostEqual(node.history_times[i], 50 - (1300 - 1020) / 1000)  # at its own time
         self.assertEqual(node.current_rssi, 30)  # then the floor again
 
     def test_native_capture_uses_live_rssi(self):
