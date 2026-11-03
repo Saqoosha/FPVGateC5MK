@@ -43,6 +43,13 @@ The crossing merge and peak-history preservation described below are new in
 also included in this RC. See [release notes](../release/RELEASE_NOTES.md)
 for the direct-USB accuracy comparison and hardware-validation limits.
 
+The running median is not in 1.2.4-rc.1. Firmware built from the branch that
+adds it (called "the median build" below) reports the same version, so check
+with `node detect`: the median build answers `median 255 ms` and `merge 0 ms
+(off)`, where 1.2.4-rc.1 answers `merge 300 ms`. Check before RH connects: a
+console command ends RH's USB session. The release notes describe 1.2.4-rc.1's
+defaults.
+
 - After a reset the C5 sends nothing on USB until the host sends a byte; the
   dashboard and `mp.py` send a command first, and `mp.py console` stays quiet
   until something is typed. On Linux, opening the port resets the C5 (the
@@ -63,33 +70,41 @@ for the direct-USB accuracy comparison and hardware-validation limits.
   frequency write RH runs API 36's register test, which passes when the seat is
   on a supported frequency.
 - RSSI is the existing C5 node-filter output divided by four, clamped to RH's
-  valid range 1-254. This does not add Widscan58's 255 ms median filter. Calibrate
-  this mode rather than assuming thresholds from a different receiver transfer.
+  valid range 1-254, then passed through a running median when one is set
+  (the median build starts with 255 ms; see below). Calibrate this mode
+  rather than assuming thresholds from a different receiver transfer.
 - EnterAt/ExitAt hysteresis and peak-plateau timing run on every successful
-  capture. Pass timestamps use the plateau midpoint on the C5 clock, reported
+  capture (with the median on, on each millisecond's median). Pass
+  timestamps use the plateau midpoint on the C5 clock, reported
   as milliseconds since the pass. USB polling delay is not added to that age;
   RH applies its own round-trip correction.
 - Pass counters wrap at 256, as in RH's node protocol. Only the latest pass per
   seat is retained between host reads; this is not an unbounded event queue.
 - RH polls each receiver a few times a second and its live graph adds a point
-  about every 200 ms, while the C5 samples each seat about 1000 times a second.
-  From 1.2.2 the RSSI the C5 reports to RH is the highest sample of about the
-  last 250 ms, so every pass reaches the live graph at its real height; before,
-  it was the latest sample, and a short pass could fall between graph points.
-  RH's Capture averages this value, so captured levels come out a few counts
-  higher than with 1.2.1 (on the safe side). Crossing detection still uses
-  every sample.
+  about every 200 ms, while the C5 samples each seat about 1030 times a second
+  with eight seats on. From 1.2.2 the RSSI the C5 reports to RH is the highest
+  level of about the last 250 ms, so every pass reaches the live graph at the
+  height detection saw; before, it was the latest sample, and a short pass
+  could fall between graph points. With the median on, that level is the
+  median's, so passes show lower than their raw peak and ones too short for
+  the median don't show at all. RH's Capture averages this value, so captured
+  levels came out a few counts higher than with 1.2.1 (measured without the
+  median). Crossing detection still uses every sample (every millisecond's
+  median with the median on).
 - For RH's RSSI history (Marshal), each poll also reports one extremum of the
-  samples since the previous poll, at its own sample times: the peak if it rose
+  samples since the previous poll (median values with the median on), at its
+  own sample times: the peak if it rose
   further from the extremum reported last than the nadir fell, otherwise the
   nadir. The full 1 kHz trace is not transferred. During a crossing, a poll
   whose samples reach the pass peak always reports that peak, so the history
   holds the first and last samples at the peak level. Marshal's
   recalculation times a lap from those, as the live lap is, so with the same
-  EnterAt/ExitAt the two agree to the millisecond. Before this the peak's
-  poll often reported a multipath dip instead and recalculated laps were
-  tens of ms off (up to 142 ms with slow polls in a simulation against RH
-  4.4.0's own client).
+  EnterAt/ExitAt the two agree to the millisecond on every pass both find.
+  They can still find different passes: Marshal cannot apply a merge, and
+  history is one point per poll (see the replay table below). Before this
+  the peak's poll often reported a multipath dip instead and recalculated
+  laps were tens of ms off (up to 142 ms with slow polls in a simulation
+  against RH 4.4.0's own client).
 - From `1.2.4-rc.1`, seats on the same frequency share one capture, filtered
   value and timestamp per scan cycle, in USB and UART modes. Thresholds and
   crossing detection remain independent per seat.
@@ -111,20 +126,44 @@ for the direct-USB accuracy comparison and hardware-validation limits.
   `node reject [rise hold quiet margin]` on the console changes the four
   values (`node reject 0` turns it off) until the C5 restarts. On a bench
   recording on 2026-10-16 this dropped 116 of 128 VTX start-up and
-  channel-change bursts and no passes.
-- This build's firmware starts with a 255 ms running median and no merge
+  channel-change bursts and no passes. That was measured without the median;
+  with it, bursts under about 128 ms are gone before the rejection sees them.
+- The median build starts with a 255 ms running median and no merge
   (`node detect 0 0 255`). Samples are averaged per millisecond and RH gets
-  the median of the last 255 of those values, as RH's own nodes median their
-  last 255 samples at 1 kHz, so the window is the same whatever the number of
-  scanned seats. Detection, RH's RSSI and its history all use the median, so
-  Marshal's recalculation sees the same level as live detection; a merge
-  window is invisible to Marshal, which is why it is off here. Passes are
-  timed about 128 ms late, the same for every pass, so only the first lap of a
-  race is longer by that much (an RX5808 node's median does the same).
-  Replaying a recorded 2 kHz flight (four passes, one quad) through each
+  the median of the last 255 of those millisecond values, like the median of
+  the last 255 samples (at up to 1 kHz) in RH's own nodes. The window is 255 ms
+  while each seat is sampled at least once per millisecond (eight seats on get
+  about 1030 samples a second each, but jitter and failed captures leave the
+  odd millisecond empty); a millisecond without a sample adds no value,
+  so missed captures stretch it. Detection, RH's RSSI and its history all use
+  the median, so Marshal's recalculation sees the same level as live
+  detection; a merge window is invisible to Marshal, which is why it is off
+  here.
+  The median trails the signal by half its window (about 128 ms), so, like
+  RH's nodes, which time the median at the middle of its window, the median
+  build moves the pass and history times it sends RH back by that much: on
+  the recorded flight, passes moved from 141 ms to 14 ms after a centred
+  reference, with live and recalculated laps still within 1 ms. The C5's own
+  clock is not moved, so the 100 ms gap and stale checks and the 250 ms RSSI
+  hold are as before. Unlike RH's nodes, which report nothing until the window
+  is full, the median build starts from one value. The window restarts when
+  RH starts a session, when the seat's own frequency changes, for every seat
+  when a settle ends (about 100 ms after any frequency change), after a gap of
+  over 100 ms, and when `node detect` changes its length. It then grows from a
+  single value, so for the first few ms it filters almost nothing (a burst of
+  a few ms right after a restart can still count as a pass, as it would
+  without the median) and reaches full strength only after 255 ms. With a
+  full window, a pass above EnterAt for less than about 128 ms, and a VTX
+  burst that short, never reaches detection; the VTX-jump rejection above
+  sees median output, not raw samples.
+  A recorded 2 kHz flight (four passes, one quad) was replayed through each
   version, polled like RH, with RH's history rebuild and Marshal
-  recalculation, EnterAt values (ExitAt 15 below) that timed every pass with
-  no extras:
+  recalculation. The table lists the EnterAt values (ExitAt 15 below) that
+  timed every pass with no extras, and how many EnterAt values made the
+  recalculation disagree with live. The replay used the raw capture and a
+  harness outside this repository; `multipilot/tools/rh_db_report.py
+  --replay` replays RH's saved history, one point per poll, which is too
+  sparse to put through a median:
 
   | Version | EnterAt timing all 4 passes | EnterAt 60-125 (14 values) where recalc disagreed with live |
   |---|---|---|
@@ -136,18 +175,20 @@ for the direct-USB accuracy comparison and hardware-validation limits.
   The median removes the multipath dips inside a pass and also short peaks
   elsewhere on the track, which a merge window cannot, so it widens the range
   of working thresholds. One flight only; more recordings are needed.
-- A pass ends only once the level has stayed under ExitAt for 300 ms. A quad
+- With a merge set (1.2.4-rc.1's default, 300 ms; off in the median build), a
+  pass ends only once the level has stayed under ExitAt for that long. A quad
   passing a gate in a small room dips under ExitAt and back (multipath); back
-  over EnterAt within 300 ms is the same pass, timed at its highest sample, as
-  FPVGate's own lap detection does. Rising only to between ExitAt and EnterAt
-  doesn't rejoin it. The lap count reaches RH 300 ms after the pass, still
-  timed at the peak. A pass already waiting out the 300 ms when the samples
-  stop still counts; RH's force-end drops it, as it drops any crossing. In a
-  whoop hall with 1-unit ExitAt hysteresis, each pass produced up to five
-  extra crossings without this.
-  `node detect [merge smooth median]` on the console changes it until the C5
-  restarts: `node detect 0` ends a pass at the first sample under ExitAt, as
-  before, and `node detect 300 0 255` restores the merge alongside the median. `smooth` (ms, off by default) averages the level over about that
+  over EnterAt within the merge is the same pass, timed at its highest
+  sample, as FPVGate's own lap detection does. Rising only to between ExitAt
+  and EnterAt doesn't rejoin it. The lap count reaches RH the merge time after
+  the pass, still timed at the peak. A pass already waiting out the merge when
+  the samples stop still counts; RH's force-end drops it, as it drops any
+  crossing. In a whoop hall with 1-unit ExitAt hysteresis, each pass produced
+  up to five extra crossings without it.
+  `node detect [merge smooth median]` on the console changes these until the
+  C5 restarts (with no values it only reports them): `node detect 300 0 255`
+  adds the merge to the median, and `node detect 300 0 0` is 1.2.4-rc.1's
+  behaviour. `smooth` (ms, off by default) averages the level over about that
   long before crossing detection and before RH sees it. That steadies a noisy
   trace but lowers passes shorter than it on RH's graph, so try it per venue.
 - The crossing flag RH reads stays set for 250 ms after a pass ends. RH reads

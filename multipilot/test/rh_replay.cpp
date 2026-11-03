@@ -1,5 +1,7 @@
 // Replays an RSSI trace through the RotorHazard USB endpoint (rh_usb.cpp) and
 // prints the laps RH would record. Used by tools/rh_db_report.py --replay.
+// The median (Detect::medianMs) stays off: RH's saved history is one point per
+// poll, too sparse to put through it.
 //
 // stdin:  "enter <level> exit <level> merge <ms> smooth <ms>" on the first line,
 //         then one "<ms> <level 1-254>" per line, in time order.

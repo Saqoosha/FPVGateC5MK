@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <limits>
+
 namespace rhusb {
 
 constexpr unsigned kSeats = 8;
@@ -13,8 +15,9 @@ constexpr uint32_t kIdleTimeoutMs = 5000;
 // After a frequency change no crossing starts for this long: the scan
 // restarts with empty filters, so a lone settling sample isn't a pass.
 constexpr uint32_t kSettleMs = 100;
-// The RSSI RH shows is the highest sample of about the last 250 ms, so its
-// graph, a point every ~200 ms, gets every peak at its true height.
+// The RSSI RH shows is the highest level of about the last 250 ms, so its
+// graph, a point every ~200 ms, gets every peak at the height detection saw
+// (with Detect::medianMs set, the median's).
 constexpr unsigned kShowBuckets = 10;
 constexpr uint32_t kShowBucketMs = 25;
 // The crossing flag RH reads stays set this long after a pass ends: RH reads
@@ -41,21 +44,38 @@ struct Reject {
 // that long before crossing detection and before RH sees it; it also lowers
 // the height of passes shorter than it, so it is off by default.
 //
-// medianMs, if set, first takes the running median of the last medianMs
-// milliseconds, as RotorHazard's own nodes do (a 255-sample median at 1 kHz):
-// samples are averaged per millisecond and the median is over those values,
-// so the window is the same however many seats are scanned. A median drops
-// both the multipath dips inside a pass and short spikes elsewhere on the
-// track, which mergeMs alone cannot, and RH's history and Marshal see the
-// same smoothed level as live detection. Passes are timed about medianMs/2
-// late, the same for every pass. Off in the portable Core; the firmware
-// starts at kMaxMedianMs.
+// medianMs, if set, first takes a running median, like RotorHazard's own
+// nodes (the last 255 samples at up to 1 kHz): samples are averaged per
+// millisecond and the median is over the last medianMs of those values, so
+// the window is medianMs long while a seat gets a sample every millisecond,
+// whatever the number of seats; a millisecond without one adds no value and
+// stretches it. A median drops both the multipath dips inside a pass and
+// short spikes elsewhere on the track, which mergeMs alone cannot, and RH's
+// history and Marshal see the same level as live detection. It also drops a
+// real pass above EnterAt for less than about medianMs/2. The median trails
+// the signal by half its window, so the times sent to RH (passes and history)
+// are moved back by that much, as RH's nodes time the median at its window's
+// middle (see Seat::lagMs). After a restart the window refills from one value
+// (RH's nodes instead wait for a full window). Off in the portable Core; see
+// firmwareDetect.
 constexpr unsigned kMaxMedianMs = 255;
 struct Detect {
-    uint16_t mergeMs = 300;  // 0: a pass ends at the first sample under ExitAt
+    uint16_t mergeMs = 300;  // 0: a pass ends at the first level under ExitAt
     uint16_t smoothMs = 0;   // 0: off
     uint16_t medianMs = 0;   // 0: off; at most kMaxMedianMs
 };
+
+// What the firmware starts with: the median, and no merge. The median already
+// removes the short (under ~medianMs/2) dips that make most extra crossings,
+// and RH's Marshal recalculation cannot apply a merge, so with both on,
+// recalculated laps disagreed with live ones more often
+// (docs/USB_ROTORHAZARD.md). `node detect 300 0 255` adds the merge back.
+inline Detect firmwareDetect() {
+    Detect d;
+    d.mergeMs = 0;
+    d.medianMs = kMaxMedianMs;
+    return d;
+}
 
 // Command IDs and byte order follow RotorHazard's src/interface/RHInterface.py.
 enum Command : uint8_t {
@@ -90,7 +110,7 @@ public:
     // 0 for riseMs turns the rejection off.
     void setReject(const Reject& reject) { reject_ = reject; }
     const Reject& reject() const { return reject_; }
-    // Restarts every seat's median window.
+    // Clamps medianMs to kMaxMedianMs; a new length restarts every seat's median window.
     void setDetect(const Detect& detect);
     const Detect& detect() const { return detect_; }
 
@@ -111,7 +131,7 @@ private:
         bool windowed = false, windowPeak = false;
         uint8_t windowMax = 0, windowMin = 0, shown = 0;
         uint32_t maxFirstMs = 0, maxLastMs = 0, minFirstMs = 0, minLastMs = 0;
-        // Rolling maximum for the RSSI RH shows: the highest sample in each
+        // Rolling maximum for the RSSI RH shows: the highest level in each
         // kShowBucketMs bucket, and which bucket (sample ms / kShowBucketMs).
         uint8_t bucketMax[kShowBuckets] = {};
         uint32_t bucketId[kShowBuckets] = {};
@@ -136,10 +156,20 @@ private:
         // Detect::medianMs: the millisecond being averaged, then the last
         // 'count' millisecond values, oldest at 'head', and the same sorted.
         bool binOpen = false;
-        uint32_t binMs = 0, binSum = 0, binN = 0, lastBinMs = 0;
+        uint32_t binMs = 0;
+        uint32_t binSum = 0;
+        uint16_t binN = 0;  // samples in one ms: ~8 at most (one seat)
         uint8_t ring[kMaxMedianMs] = {}, sorted[kMaxMedianMs] = {};
         uint8_t count = 0, head = 0;
+        // How far the median trails the signal (half the window, in ms; 0 with
+        // the median off). Only the times RH is sent are moved back by it, so
+        // passes and history are timed like RH's own nodes; the C5's own
+        // clock (gaps, settling, staleness, the shown-RSSI hold) is unchanged.
+        uint8_t lagMs = 0;
     } seats_[kSeats];
+    static_assert(kMaxMedianMs <= std::numeric_limits<decltype(Seat::count)>::max() &&
+                      kMaxMedianMs <= std::numeric_limits<decltype(Seat::head)>::max(),
+                  "the median window must fit Seat::count and Seat::head");
     Port& port_;
     Reject reject_;
     Detect detect_;
@@ -152,11 +182,14 @@ private:
     void reply(const uint8_t* data, size_t size);
     void latchStats(uint32_t nowMs);
     void settleAll(uint32_t nowMs);
-    // One level, median-filtered or not, at its time: everything after it.
+    // One level (the median, or the raw level with it off) at its time, through
+    // smoothing, settling, crossing detection and what RH is shown.
     void process(Seat& seat, uint8_t level, uint32_t sampleMs);
     // Adds a millisecond value to the seat's median window and returns the median.
     uint8_t medianPush(Seat& seat, uint8_t level);
     static void medianReset(Seat& seat) { seat.binOpen = false; seat.count = seat.head = 0; }
+    // Back to a fresh Seat (the default member values), from one constant.
+    static void resetSeat(Seat& seat);
     static uint8_t shownRssi(const Seat& seat, uint32_t nowMs);
     // A level for RH's RSSI and history, sampled from firstMs to lastMs.
     static void show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs);

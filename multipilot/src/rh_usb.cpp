@@ -24,7 +24,7 @@ bool tuned(uint16_t mhz) { return mhz >= 5180 && mhz <= 5917; }
 void Core::begin(uint32_t nowMs) {
     selected_ = command_ = needed_ = received_ = 0;
     lastCommandMs_ = lastByteMs_ = nowMs;
-    for (auto& seat : seats_) seat = Seat{};
+    for (auto& seat : seats_) resetSeat(seat);
     const uint16_t raceband[kSeats] = {5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917};
     for (unsigned i = 0; i < kSeats; ++i) seats_[i].frequency = raceband[i];
     // RH requires nonzero frequencies while discovering its hardware interface.
@@ -33,13 +33,18 @@ void Core::begin(uint32_t nowMs) {
     memset(stats_, 0, sizeof stats_);
 }
 
+void Core::resetSeat(Seat& seat) {
+    static constexpr Seat fresh{};  // constant-initialized: no guard, no copy in RAM
+    seat = fresh;
+}
+
 void Core::settleAll(uint32_t nowMs) {
     // Every frequency change restarts the scan of all seats with empty filters.
+    // The median windows restart when the settle ends (see sample()).
     for (auto& seat : seats_) {
         stopCrossing(seat);
         seat.quiet = seat.quietSeen = seat.smoothed = false;
         seat.settleUntilMs = nowMs + kSettleMs;
-        medianReset(seat);
     }
 }
 
@@ -123,7 +128,8 @@ void Core::latchStats(uint32_t nowMs) {
     // History: one extremum of the samples since the last poll, at its actual
     // sample times, as RH's own nodes report it: the peak if it rose further
     // from the extremum shown last than the nadir fell, else the nadir. A
-    // short pass between polls then reaches RH's graph at its true height.
+    // short pass between polls then reaches RH's graph at the height
+    // detection saw (the median's, with the median on).
     if (seat.windowed) {
         bool peak = seat.windowPeak || seat.windowMax - seat.shown >= seat.shown - seat.windowMin;
         uint32_t firstMs = peak ? seat.maxFirstMs : seat.minFirstMs;
@@ -131,14 +137,14 @@ void Core::latchStats(uint32_t nowMs) {
         seat.shown = peak ? seat.windowMax : seat.windowMin;
         if (peak) stats_[8] |= 2;
         stats_[11] = seat.shown;
-        put16(stats_ + 12, boundedAge(nowMs, firstMs));
+        put16(stats_ + 12, boundedAge(nowMs, firstMs - seat.lagMs));  // see Seat::lagMs
         put16(stats_ + 14, boundedAge(lastMs, firstMs));  // how long it held
         seat.windowed = seat.windowPeak = false;
     } else {
         // No samples since the last poll: the latest (or stale) level.
         stats_[8] |= 2;
         stats_[11] = seat.rssi;
-        put16(stats_ + 12, boundedAge(nowMs, seat.sampleMs));
+        put16(stats_ + 12, boundedAge(nowMs, seat.sampleMs - seat.lagMs));
         put16(stats_ + 14, 0);
     }
 }
@@ -192,7 +198,7 @@ void Core::applyWrite(uint32_t nowMs) {
             if (frequency && frequency != kSeatOffMhz && !tuned(frequency)) return;
             if (frequency != seat.frequency) {
                 uint8_t lap = seat.lap, enter = seat.enter, exit = seat.exit;
-                seat = Seat{};
+                resetSeat(seat);
                 seat.lap = lap; seat.enter = enter; seat.exit = exit;
                 seat.frequency = frequency;  // kept as written, for RH's read-back
                 uint16_t slots[kSeats];
@@ -222,17 +228,31 @@ void Core::sample(unsigned index, uint16_t rawRssi, uint32_t sampleMs) {
     if (level < 1) level = 1;
     if (level > 254) level = 254;
     if (!detect_.medianMs) {
+        seat.lagMs = 0;
         process(seat, level, sampleMs);
         return;
     }
     // A millisecond is complete once a sample from a later one arrives.
     if (seat.binOpen && sampleMs != seat.binMs) {
-        uint8_t mean = (uint8_t)((seat.binSum + seat.binN / 2) / seat.binN);
-        // A gap restarts the window, as it ends any crossing (see process).
-        if (seat.count && seat.binMs - seat.lastBinMs > 100) seat.count = seat.head = 0;
-        seat.lastBinMs = seat.binMs;
         seat.binOpen = false;
-        process(seat, medianPush(seat, mean), seat.binMs);
+        if (sampleMs - seat.binMs > 100) {
+            // The samples stopped after this ms. Don't feed it in long after, at
+            // its old time (RH may already have read the seat as stale), and
+            // restart the window, as the gap ends any crossing (see process).
+            medianReset(seat);
+        } else {
+            uint8_t mean = (uint8_t)((seat.binSum + seat.binN / 2) / seat.binN);
+            // The end of a settle restarts the window: the values taken while
+            // the receiver settled after a frequency change never reach detection.
+            bool settleEnded = (int32_t)(seat.binMs - seat.settleUntilMs) >= 0 &&
+                               (int32_t)(seat.sampleMs - seat.settleUntilMs) < 0;
+            if (seat.count && settleEnded) medianReset(seat);
+            uint8_t median = medianPush(seat, mean);
+            // The median of the last count values is that of the one about
+            // count/2 ms back: report times that much earlier, as RH's nodes do.
+            seat.lagMs = (uint8_t)((seat.count - 1) / 2);
+            process(seat, median, seat.binMs);
+        }
     }
     if (!seat.binOpen) {
         seat.binOpen = true;
@@ -244,9 +264,13 @@ void Core::sample(unsigned index, uint16_t rawRssi, uint32_t sampleMs) {
 }
 
 void Core::setDetect(const Detect& detect) {
+    uint16_t was = detect_.medianMs;
     detect_ = detect;
     if (detect_.medianMs > kMaxMedianMs) detect_.medianMs = kMaxMedianMs;
-    for (auto& seat : seats_) medianReset(seat);
+    // Only a new window length restarts the windows (medianPush needs count <=
+    // the window); changing merge or smoothing mid-pass leaves them filtering.
+    if (detect_.medianMs != was)
+        for (auto& seat : seats_) medianReset(seat);
 }
 
 uint8_t Core::medianPush(Seat& seat, uint8_t level) {
@@ -267,7 +291,7 @@ uint8_t Core::medianPush(Seat& seat, uint8_t level) {
     for (; j && seat.sorted[j - 1] > level; --j) seat.sorted[j] = seat.sorted[j - 1];
     seat.sorted[j] = level;
     seat.count = (uint8_t)(n + 1);
-    return seat.sorted[n / 2];
+    return seat.sorted[n / 2];  // the lower middle value while the count is even
 }
 
 void Core::process(Seat& seat, uint8_t level, uint32_t sampleMs) {
@@ -443,7 +467,7 @@ void Core::endPass(Seat& seat, uint32_t endMs) {
     seat.crossing = seat.ending = false;
     seat.shownCrossing = true;
     seat.shownUntilMs = endMs + kShowCrossingMs;
-    seat.passMs = seat.firstPeakMs + (seat.lastPeakMs - seat.firstPeakMs) / 2;
+    seat.passMs = seat.firstPeakMs + (seat.lastPeakMs - seat.firstPeakMs) / 2 - seat.lagMs;
     ++seat.lap;
 }
 

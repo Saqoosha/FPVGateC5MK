@@ -473,21 +473,28 @@ void smoothTests() {
     CHECK(stats()[3] == 150);
 }
 
-// Detect::medianMs: a pass whose level drops for a few ms at a time is one lap
-// without mergeMs, a short burst is none, samples in one ms are averaged, and
-// the window is clamped and restarted by setDetect.
+// Detect::medianMs: a pass whose level drops for 8 ms in every 40 is one lap
+// without mergeMs, a burst under medianMs/2 is none and never reaches RH's
+// history, samples in one ms are averaged (rounded), and the window is clamped,
+// restarted by a new median length, the end of a settle, an own-seat retune
+// and a gap, and safe to shrink.
 void medianTests() {
-    auto run = [](unsigned medianMs, uint32_t burstMs, unsigned* lapsOut, uint16_t* ageOut) {
-        Port port;
-        rhusb::Core core(port);
+    auto setup = [](rhusb::Core& core, unsigned medianMs, bool reject) {
         core.begin(0);
-        rhusb::Reject off;
-        off.riseMs = 0;  // short peaks straight off the floor (see rejectTests)
-        core.setReject(off);
+        if (!reject) {
+            rhusb::Reject off;
+            off.riseMs = 0;  // short peaks straight off the floor (see rejectTests)
+            core.setReject(off);
+        }
         rhusb::Detect d;
         d.mergeMs = 0;  // the median alone
         d.medianMs = (uint16_t)medianMs;
         core.setDetect(d);
+    };
+    auto run = [&](unsigned medianMs, uint32_t burstMs, bool reject, unsigned* lapsOut, uint16_t* ageOut) {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, medianMs, reject);
         write(core, 0x7A, {3}, 0);
         write(core, 0x71, {100}, 0);
         write(core, 0x72, {85}, 0);
@@ -503,29 +510,182 @@ void medianTests() {
     };
     unsigned laps;
     uint16_t age;
-    run(0, 600, &laps, &age);
+    run(0, 600, false, &laps, &age);
     CHECK(laps > 10);  // no median, no merge: every dip ends the crossing
-    CHECK(run(255, 600, &laps, &age) == 255);
+    CHECK(run(255, 600, false, &laps, &age) == 255);
     CHECK(laps == 1);
-    // Timed at the middle of the filtered plateau: ~1300 ms, ~128 ms late.
-    CHECK(age >= 2500 - 1300 - 128 - 40 && age <= 2500 - 1300 - 128 + 40);
-    run(255, 100, &laps, &age);
-    CHECK(laps == 0);  // a 100 ms burst never reaches the median
-    CHECK(run(1000, 600, &laps, &age) == rhusb::kMaxMedianMs);
-
-    // Two samples in one millisecond count as their mean.
-    Port port;
-    rhusb::Core core(port);
-    core.begin(0);
-    rhusb::Detect d;
-    d.medianMs = 1;
-    core.setDetect(d);
-    write(core, 0x7A, {4}, 0);
-    for (uint32_t t = 200; t < 300; ++t) {
-        core.sample(4, 400, t);
-        core.sample(4, 480, t);
+    // At the raw plateau's middle (~1300 ms): the median's ~128 ms delay is
+    // taken off the time RH is sent, as RH's own nodes do.
+    CHECK(age >= 2500 - 1300 - 15 && age <= 2500 - 1300 + 15);
+    run(255, 600, true, &laps, &age);
+    CHECK(laps == 1);  // the same with the firmware's VTX-jump rejection on
+    {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 255, false);
+        rhusb::Detect d = core.detect();
+        d.mergeMs = 300;  // `node detect 300 0 255`
+        core.setDetect(d);
+        write(core, 0x7A, {3}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        for (uint32_t t = 200; t < 2500; ++t) core.sample(3, t >= 1000 && t < 1600 && (t - 1000) % 40 >= 8 ? 560 : 160, t);
+        auto s = read(core, port, 0x05, 2500);
+        uint16_t mergeAge = (uint16_t)(s[1] * 256 + s[2]);
+        CHECK(s[0] == 1 && mergeAge >= 2500 - 1300 - 15 && mergeAge <= 2500 - 1300 + 15);
     }
-    CHECK(read(core, port, 0x05, 300)[3] == 110);  // (100 + 120) / 2
+    run(255, 100, false, &laps, &age);
+    CHECK(laps == 0);  // a 100 ms burst never gets through the median to detection
+    CHECK(run(1000, 600, false, &laps, &age) == rhusb::kMaxMedianMs);
+    CHECK(laps == 1);  // clamped to 255, still one pass
+
+    // What the firmware starts with.
+    CHECK(rhusb::firmwareDetect().medianMs == rhusb::kMaxMedianMs && rhusb::firmwareDetect().mergeMs == 0 &&
+          rhusb::firmwareDetect().smoothMs == 0);
+
+    // Samples in one millisecond count as their rounded mean.
+    {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 1, false);
+        write(core, 0x7A, {4}, 0);
+        for (uint32_t t = 200; t < 300; ++t) {
+            core.sample(4, 400, t);
+            core.sample(4, 480, t);
+        }
+        CHECK(read(core, port, 0x05, 300)[3] == 110);  // (100 + 120) / 2
+        for (uint32_t t = 600; t < 700; ++t) {
+            core.sample(4, 400, t);
+            core.sample(4, 404, t);
+        }
+        CHECK(read(core, port, 0x05, 700)[3] == 101);  // (100 + 101) / 2, rounded
+        for (uint32_t t = 1000; t < 1100; ++t) {
+            core.sample(4, 400, t);
+            core.sample(4, 400, t);
+            core.sample(4, 404, t);
+        }
+        CHECK(read(core, port, 0x05, 1100)[3] == 100);  // (100 + 100 + 101) / 3, rounded down
+    }
+
+    // A 50 ms spike reaches neither RH's history, its RSSI nor NodePeak.
+    {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 255, false);
+        write(core, 0x7A, {2}, 0);
+        write(core, 0x71, {200}, 0);  // history only
+        write(core, 0x72, {190}, 0);
+        uint8_t highest = 0;
+        for (uint32_t t = 200; t < 1500; ++t) {
+            core.sample(2, t >= 800 && t < 850 ? 1016 : 160, t);
+            if (t % 100 == 0) {
+                auto s = read(core, port, 0x05, t);
+                if (s[11] > highest) highest = s[11];
+                if (s[3] > highest) highest = s[3];
+            }
+        }
+        CHECK(highest == 40);
+        CHECK(read(core, port, 0x23, 1500)[0] == 40);  // NodePeak
+    }
+
+    // Restarts. Seat 3 sits at 140 (over EnterAt) for 1.3 s, then drops to 40.
+    // Without a restart the old window keeps the median at 140 for ~128 more bins.
+    auto afterHigh = [&](int how, uint32_t untilMs) {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 255, false);
+        write(core, 0x7A, {3}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        for (uint32_t t = 200; t < 1500; ++t) core.sample(3, 560, t);  // 140
+        uint8_t before = read(core, port, 0x05, 1500)[0];
+        uint32_t t0 = 1500;
+        if (how == 1) t0 = 1700;  // 200 ms with no samples: the crossing is cancelled
+        if (how == 4) t0 = 1601;  // 102 ms (the last sample was at 1499)
+        if (how == 6) t0 = 1599;  // exactly 100 ms: not a gap, as in process()
+        if (how == 7) t0 = 1600;  // 101 ms: a gap
+        if (how == 2) {           // a frequency change on seat 1 settles every seat
+            write(core, 0x7A, {1}, 1500);
+            write(core, 0x51, {0x16, 0x47}, 1500);
+            write(core, 0x7A, {3}, 1500);
+        }
+        if (how == 3 || how == 5 || how == 8) {
+            rhusb::Detect d = core.detect();
+            if (how == 3) d.medianMs = 254;   // a new length restarts the windows
+            if (how == 5) d.smoothMs = 0;     // the same length again does not
+            if (how == 8) d.medianMs = 1000;  // nor does one that clamps to it
+            core.setDetect(d);
+        }
+        for (uint32_t t = t0; t < untilMs; ++t) core.sample(3, 160, t);  // 40
+        return (unsigned)(uint8_t)(read(core, port, 0x05, untilMs)[0] - before);
+    };
+    // A gap or a frequency change cancels the crossing, and the restarted
+    // window has nothing left to start a phantom one with.
+    CHECK(afterHigh(1, 2100) == 0);
+    CHECK(afterHigh(4, 2000) == 0);
+    CHECK(afterHigh(7, 2000) == 0);
+    // A 100 ms gap keeps the window and the crossing: no lap yet 20 ms later
+    // (a restart would end it at once), one when the median comes down.
+    CHECK(afterHigh(6, 1619) == 0);
+    CHECK(afterHigh(6, 2000) == 1);
+    CHECK(afterHigh(2, 1900) == 0);
+    // setDetect keeps the crossing but restarts the window: it ends at once.
+    CHECK(afterHigh(3, 1520) == 1);
+    CHECK(afterHigh(0, 1520) == 0);  // without a restart it is still going
+    CHECK(afterHigh(5, 1520) == 0);  // nor does setDetect with the same median length
+    CHECK(afterHigh(8, 1520) == 0);
+
+    // A frequency change on seat 3 (which empties its window), then 100 ms of a
+    // settling transient at 140: those values are dropped when the settle ends,
+    // so no crossing follows. Without that restart the window would hold only
+    // the transient and cross EnterAt.
+    {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 255, false);
+        write(core, 0x7A, {3}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        for (uint32_t t = 200; t < 1500; ++t) core.sample(3, 160, t);  // 40
+        uint8_t before = read(core, port, 0x05, 1500)[0];
+        write(core, 0x51, {0x16, 0x47}, 1500);  // seat 3 to 5703; settles every seat until 1600
+        for (uint32_t t = 1500; t < 2200; ++t) core.sample(3, t < 1600 ? 560 : 160, t);
+        auto s = read(core, port, 0x05, 2200);
+        CHECK(s[0] == before && !(s[8] & 1));
+        CHECK(read(core, port, 0x23, 2200)[0] == 40);  // NodePeak: not the transient
+    }
+
+    // Shrinking a full window, and then filtering with the smaller one.
+    {
+        Port port;
+        rhusb::Core core(port);
+        setup(core, 255, false);
+        write(core, 0x7A, {5}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        // 600 bins of varied levels under ExitAt (40-78): full and wrapped, so a
+        // wrong head or sorted copy after the shrink shows up (under ASan).
+        for (uint32_t t = 200; t < 800; ++t) core.sample(5, (uint16_t)(160 + (t % 20) * 8), t);
+        rhusb::Detect d = core.detect();
+        d.medianMs = 5;
+        core.setDetect(d);
+        CHECK(core.detect().medianMs == 5);
+        uint8_t lapsBefore = read(core, port, 0x05, 800)[0];
+        // A 2 ms dip in a 100 ms pass: a 5 ms median bridges it into one lap.
+        for (uint32_t t = 800; t < 1200; ++t)
+            core.sample(5, t >= 900 && t < 1000 && !(t >= 950 && t < 952) ? 560 : 160, t);
+        CHECK(read(core, port, 0x05, 1200)[0] == (uint8_t)(lapsBefore + 1));
+
+        // Growing it back (`node detect 0 0 255` after `0 0 5`) restarts the
+        // window too; without that the wrapped 5-slot ring would be read as a
+        // 255-slot one.
+        for (uint32_t t = 1200; t < 1800; ++t) core.sample(5, (uint16_t)(160 + (t % 20) * 8), t);
+        d.medianMs = 255;
+        core.setDetect(d);
+        lapsBefore = read(core, port, 0x05, 1800)[0];
+        for (uint32_t t = 1800; t < 3000; ++t) core.sample(5, t >= 2000 && t < 2600 ? 560 : 160, t);
+        CHECK(read(core, port, 0x05, 3000)[0] == (uint8_t)(lapsBefore + 1));
+    }
 }
 
 // Line-based simulator for Python tests driving RH's actual serial-node client.

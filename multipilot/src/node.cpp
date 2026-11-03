@@ -308,18 +308,7 @@ void begin(node::RadioPort* radio, bool radioOk) {
     if (plus) *plus++ = 0;
     core->setIdentity(version, plus ? plus : "?");
     rh.setIdentity(version, plus ? plus : "ESP32-C5");
-    {
-        rhusb::Detect d = rh.detect();
-        // A median already removes the dips mergeMs waits out, and RH's
-        // Marshal recalculation cannot apply mergeMs, so with it on the merge
-        // only made recalculated laps disagree with live ones. Measured on a
-        // recorded flight, merge 300 timed every pass live at 5 EnterAt values
-        // against 4, but recalculation disagreed with live at 6 of 14 values
-        // against 2 with merge 0. `node detect 300 0 255` brings it back.
-        d.medianMs = rhusb::kMaxMedianMs;
-        d.mergeMs = 0;
-        rh.setDetect(d);
-    }
+    rh.setDetect(rhusb::firmwareDetect());
     hostlink::setByteHandler(usbByte);
     esp_ota_img_states_t state;
     onTrial = esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
@@ -435,11 +424,14 @@ void console(char* args) {
         // RH over USB: how long under ExitAt ends a pass, and optional smoothing and median (see rhusb::Detect).
         rhusb::Detect d = rh.detect();
         char* v = rest ? strtok(rest, " ") : nullptr;
+        bool given = v != nullptr;
         if (v) d.mergeMs = (uint16_t)atoi(v);
         if (v && (v = strtok(nullptr, " "))) d.smoothMs = (uint16_t)atoi(v);
         if (v && (v = strtok(nullptr, " "))) d.medianMs = (uint16_t)atoi(v);
-        rh.setDetect(d);
-        d = rh.detect();  // medianMs clamped
+        if (given) {
+            rh.setDetect(d);  // not for a plain query: nothing to set
+            d = rh.detect();  // medianMs clamped
+        }
         hostlink::say("node detect: merge %u ms%s, smooth %u ms%s, median %u ms%s\n", d.mergeMs,
                       d.mergeMs ? "" : " (off)", d.smoothMs, d.smoothMs ? "" : " (off)", d.medianMs,
                       d.medianMs ? "" : " (off)");
