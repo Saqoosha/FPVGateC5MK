@@ -112,6 +112,30 @@ for the direct-USB accuracy comparison and hardware-validation limits.
   values (`node reject 0` turns it off) until the C5 restarts. On a bench
   recording on 2026-10-16 this dropped 116 of 128 VTX start-up and
   channel-change bursts and no passes.
+- This build's firmware starts with a 255 ms running median and no merge
+  (`node detect 0 0 255`). Samples are averaged per millisecond and RH gets
+  the median of the last 255 of those values, as RH's own nodes median their
+  last 255 samples at 1 kHz, so the window is the same whatever the number of
+  scanned seats. Detection, RH's RSSI and its history all use the median, so
+  Marshal's recalculation sees the same level as live detection; a merge
+  window is invisible to Marshal, which is why it is off here. Passes are
+  timed about 128 ms late, the same for every pass, so only the first lap of a
+  race is longer by that much (an RX5808 node's median does the same).
+  Replaying a recorded 2 kHz flight (four passes, one quad) through each
+  version, polled like RH, with RH's history rebuild and Marshal
+  recalculation, EnterAt values (ExitAt 15 below) that timed every pass with
+  no extras:
+
+  | Version | EnterAt timing all 4 passes | EnterAt 60-125 (14 values) where recalc disagreed with live |
+  |---|---|---|
+  | 1.2.3 | none | all |
+  | 1.2.4-rc.1 (merge 300) | 120, 125 | 13 |
+  | + median 255, merge 300 | 90, 105-120 | 6 |
+  | + median 255, merge 0 | 105-120 | 2 |
+
+  The median removes the multipath dips inside a pass and also short peaks
+  elsewhere on the track, which a merge window cannot, so it widens the range
+  of working thresholds. One flight only; more recordings are needed.
 - A pass ends only once the level has stayed under ExitAt for 300 ms. A quad
   passing a gate in a small room dips under ExitAt and back (multipath); back
   over EnterAt within 300 ms is the same pass, timed at its highest sample, as
@@ -121,9 +145,9 @@ for the direct-USB accuracy comparison and hardware-validation limits.
   stop still counts; RH's force-end drops it, as it drops any crossing. In a
   whoop hall with 1-unit ExitAt hysteresis, each pass produced up to five
   extra crossings without this.
-  `node detect [merge smooth]` on the console changes it until the C5
+  `node detect [merge smooth median]` on the console changes it until the C5
   restarts: `node detect 0` ends a pass at the first sample under ExitAt, as
-  before. `smooth` (ms, off by default) averages the level over about that
+  before, and `node detect 300 0 255` restores the merge alongside the median. `smooth` (ms, off by default) averages the level over about that
   long before crossing detection and before RH sees it. That steadies a noisy
   trace but lowers passes shorter than it on RH's graph, so try it per venue.
 - The crossing flag RH reads stays set for 250 ms after a pass ends. RH reads

@@ -473,6 +473,61 @@ void smoothTests() {
     CHECK(stats()[3] == 150);
 }
 
+// Detect::medianMs: a pass whose level drops for a few ms at a time is one lap
+// without mergeMs, a short burst is none, samples in one ms are averaged, and
+// the window is clamped and restarted by setDetect.
+void medianTests() {
+    auto run = [](unsigned medianMs, uint32_t burstMs, unsigned* lapsOut, uint16_t* ageOut) {
+        Port port;
+        rhusb::Core core(port);
+        core.begin(0);
+        rhusb::Reject off;
+        off.riseMs = 0;  // short peaks straight off the floor (see rejectTests)
+        core.setReject(off);
+        rhusb::Detect d;
+        d.mergeMs = 0;  // the median alone
+        d.medianMs = (uint16_t)medianMs;
+        core.setDetect(d);
+        write(core, 0x7A, {3}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        // Floor 40; from 1000 ms a signal at 140 that drops to 40 for 8 ms in every 40.
+        for (uint32_t t = 200; t < 2500; ++t) {
+            bool on = t >= 1000 && t < 1000 + burstMs && (t - 1000) % 40 >= 8;
+            core.sample(3, on ? 560 : 160, t);
+        }
+        auto stats = read(core, port, 0x05, 2500);
+        *lapsOut = stats[0];
+        *ageOut = (uint16_t)(stats[1] * 256 + stats[2]);
+        return core.detect().medianMs;
+    };
+    unsigned laps;
+    uint16_t age;
+    run(0, 600, &laps, &age);
+    CHECK(laps > 10);  // no median, no merge: every dip ends the crossing
+    CHECK(run(255, 600, &laps, &age) == 255);
+    CHECK(laps == 1);
+    // Timed at the middle of the filtered plateau: ~1300 ms, ~128 ms late.
+    CHECK(age >= 2500 - 1300 - 128 - 40 && age <= 2500 - 1300 - 128 + 40);
+    run(255, 100, &laps, &age);
+    CHECK(laps == 0);  // a 100 ms burst never reaches the median
+    CHECK(run(1000, 600, &laps, &age) == rhusb::kMaxMedianMs);
+
+    // Two samples in one millisecond count as their mean.
+    Port port;
+    rhusb::Core core(port);
+    core.begin(0);
+    rhusb::Detect d;
+    d.medianMs = 1;
+    core.setDetect(d);
+    write(core, 0x7A, {4}, 0);
+    for (uint32_t t = 200; t < 300; ++t) {
+        core.sample(4, 400, t);
+        core.sample(4, 480, t);
+    }
+    CHECK(read(core, port, 0x05, 300)[3] == 110);  // (100 + 120) / 2
+}
+
 // Line-based simulator for Python tests driving RH's actual serial-node client.
 int bridge() {
     Port port;
@@ -510,6 +565,7 @@ int main(int argc, char** argv) {
     lowEnterTests();
     mergeTests();
     smoothTests();
+    medianTests();
     printf("RH USB: %d checks, %d failures\n", checks, fails);
     return fails ? 1 : 0;
 }

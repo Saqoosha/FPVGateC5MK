@@ -40,9 +40,21 @@ struct Reject {
 // still timed at the peak. smoothMs, if set, averages the level over about
 // that long before crossing detection and before RH sees it; it also lowers
 // the height of passes shorter than it, so it is off by default.
+//
+// medianMs, if set, first takes the running median of the last medianMs
+// milliseconds, as RotorHazard's own nodes do (a 255-sample median at 1 kHz):
+// samples are averaged per millisecond and the median is over those values,
+// so the window is the same however many seats are scanned. A median drops
+// both the multipath dips inside a pass and short spikes elsewhere on the
+// track, which mergeMs alone cannot, and RH's history and Marshal see the
+// same smoothed level as live detection. Passes are timed about medianMs/2
+// late, the same for every pass. Off in the portable Core; the firmware
+// starts at kMaxMedianMs.
+constexpr unsigned kMaxMedianMs = 255;
 struct Detect {
     uint16_t mergeMs = 300;  // 0: a pass ends at the first sample under ExitAt
     uint16_t smoothMs = 0;   // 0: off
+    uint16_t medianMs = 0;   // 0: off; at most kMaxMedianMs
 };
 
 // Command IDs and byte order follow RotorHazard's src/interface/RHInterface.py.
@@ -78,7 +90,8 @@ public:
     // 0 for riseMs turns the rejection off.
     void setReject(const Reject& reject) { reject_ = reject; }
     const Reject& reject() const { return reject_; }
-    void setDetect(const Detect& detect) { detect_ = detect; }
+    // Restarts every seat's median window.
+    void setDetect(const Detect& detect);
     const Detect& detect() const { return detect_; }
 
 private:
@@ -120,6 +133,12 @@ private:
         // The Detect::smoothMs average of the level (valid once smoothed).
         bool smoothed = false;
         float smooth = 0;
+        // Detect::medianMs: the millisecond being averaged, then the last
+        // 'count' millisecond values, oldest at 'head', and the same sorted.
+        bool binOpen = false;
+        uint32_t binMs = 0, binSum = 0, binN = 0, lastBinMs = 0;
+        uint8_t ring[kMaxMedianMs] = {}, sorted[kMaxMedianMs] = {};
+        uint8_t count = 0, head = 0;
     } seats_[kSeats];
     Port& port_;
     Reject reject_;
@@ -133,6 +152,11 @@ private:
     void reply(const uint8_t* data, size_t size);
     void latchStats(uint32_t nowMs);
     void settleAll(uint32_t nowMs);
+    // One level, median-filtered or not, at its time: everything after it.
+    void process(Seat& seat, uint8_t level, uint32_t sampleMs);
+    // Adds a millisecond value to the seat's median window and returns the median.
+    uint8_t medianPush(Seat& seat, uint8_t level);
+    static void medianReset(Seat& seat) { seat.binOpen = false; seat.count = seat.head = 0; }
     static uint8_t shownRssi(const Seat& seat, uint32_t nowMs);
     // A level for RH's RSSI and history, sampled from firstMs to lastMs.
     static void show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs);
