@@ -39,6 +39,7 @@ void Core::settleAll(uint32_t nowMs) {
         stopCrossing(seat);
         seat.quiet = seat.quietSeen = false;
         seat.settleUntilMs = nowMs + kSettleMs;
+        smoothReset(seat);
     }
 }
 
@@ -219,6 +220,55 @@ void Core::sample(unsigned index, uint16_t rawRssi, uint32_t sampleMs) {
     uint8_t level = (uint8_t)(rawRssi / 4);
     if (level < 1) level = 1;
     if (level > 254) level = 254;
+    if (!smoothMs_) {
+        process(seat, level, sampleMs);
+        return;
+    }
+    // A millisecond is complete once a sample from a later one arrives.
+    if (seat.binOpen && sampleMs != seat.binMs) {
+        uint8_t mean = (uint8_t)((seat.binSum + seat.binN / 2) / seat.binN);
+        // A gap restarts the window, as it ends any crossing (see process).
+        if (seat.count && seat.binMs - seat.lastBinMs > 100) seat.count = seat.head = 0;
+        seat.lastBinMs = seat.binMs;
+        seat.binOpen = false;
+        process(seat, smoothPush(seat, mean), seat.binMs);
+    }
+    if (!seat.binOpen) {
+        seat.binOpen = true;
+        seat.binMs = sampleMs;
+        seat.binSum = seat.binN = 0;
+    }
+    seat.binSum += level;
+    ++seat.binN;
+}
+
+void Core::setSmooth(unsigned ms) {
+    smoothMs_ = ms > kMaxSmoothMs ? kMaxSmoothMs : ms;
+    for (auto& seat : seats_) smoothReset(seat);
+}
+
+uint8_t Core::smoothPush(Seat& seat, uint8_t level) {
+    unsigned n = seat.count;
+    if (n == smoothMs_) {
+        // Full: the new value replaces the oldest, in the ring and the sorted copy.
+        uint8_t old = seat.ring[seat.head];
+        unsigned i = 0;
+        while (seat.sorted[i] != old) ++i;
+        memmove(&seat.sorted[i], &seat.sorted[i + 1], n - 1 - i);
+        --n;
+        seat.ring[seat.head] = level;
+        seat.head = (uint8_t)((seat.head + 1) % smoothMs_);
+    } else {
+        seat.ring[(seat.head + n) % smoothMs_] = level;
+    }
+    unsigned j = n;
+    for (; j && seat.sorted[j - 1] > level; --j) seat.sorted[j] = seat.sorted[j - 1];
+    seat.sorted[j] = level;
+    seat.count = (uint8_t)(n + 1);
+    return seat.sorted[n / 2];
+}
+
+void Core::process(Seat& seat, uint8_t level, uint32_t sampleMs) {
     if (seat.sampled) {
         uint32_t elapsed = sampleMs - seat.sampleMs;
         seat.loopUs = elapsed > 65 ? 65535 : (uint16_t)(elapsed * 1000);

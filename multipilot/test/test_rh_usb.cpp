@@ -222,6 +222,55 @@ void shownAndSettleTests() {
     CHECK(read(core, port, 0x05, 1121)[0] == (uint8_t)(laps + 1));
 }
 
+// Smoothing: a pass whose level drops for a few ms at a time is one lap, a
+// short burst is none, and several samples in one millisecond are averaged.
+void smoothTests() {
+    auto run = [](unsigned smoothMs, uint32_t burstMs, unsigned* lapsOut, uint16_t* ageOut) {
+        Port port;
+        rhusb::Core core(port);
+        core.begin(0);
+        rhusb::Reject off;
+        off.riseMs = 0;  // short peaks straight off the floor (see rejectTests)
+        core.setReject(off);
+        core.setSmooth(smoothMs);
+        write(core, 0x7A, {3}, 0);
+        write(core, 0x71, {100}, 0);
+        write(core, 0x72, {85}, 0);
+        // Floor 40; from 1000 ms a signal at 140 that drops to 40 for 8 ms in every 40.
+        for (uint32_t t = 200; t < 2500; ++t) {
+            bool on = t >= 1000 && t < 1000 + burstMs && (t - 1000) % 40 >= 8;
+            core.sample(3, on ? 560 : 160, t);
+        }
+        auto stats = read(core, port, 0x05, 2500);
+        *lapsOut = stats[0];
+        *ageOut = (uint16_t)(stats[1] * 256 + stats[2]);
+        return core.smooth();
+    };
+    unsigned laps;
+    uint16_t age;
+    run(0, 600, &laps, &age);
+    CHECK(laps > 10);  // unsmoothed: every dip ends the crossing
+    CHECK(run(255, 600, &laps, &age) == 255);
+    CHECK(laps == 1);
+    // Timed at the middle of the smoothed plateau: ~1300 ms, ~128 ms late.
+    CHECK(age >= 2500 - 1300 - 128 - 40 && age <= 2500 - 1300 - 128 + 40);
+    run(255, 100, &laps, &age);
+    CHECK(laps == 0);  // a 100 ms burst never reaches the median
+    CHECK(run(1000, 600, &laps, &age) == rhusb::kMaxSmoothMs);
+
+    // Two samples in one millisecond count as their mean.
+    Port port;
+    rhusb::Core core(port);
+    core.begin(0);
+    core.setSmooth(1);
+    write(core, 0x7A, {4}, 0);
+    for (uint32_t t = 200; t < 300; ++t) {
+        core.sample(4, 400, t);
+        core.sample(4, 480, t);
+    }
+    CHECK(read(core, port, 0x05, 300)[3] == 110);  // (100 + 120) / 2
+}
+
 void rejectTests() {
     Port port;
     rhusb::Core core(port);
@@ -354,6 +403,7 @@ int main(int argc, char** argv) {
     tests();
     historyTests();
     shownAndSettleTests();
+    smoothTests();
     rejectTests();
     lowEnterTests();
     printf("RH USB: %d checks, %d failures\n", checks, fails);

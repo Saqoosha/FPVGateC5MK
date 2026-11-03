@@ -308,6 +308,7 @@ void begin(node::RadioPort* radio, bool radioOk) {
     if (plus) *plus++ = 0;
     core->setIdentity(version, plus ? plus : "?");
     rh.setIdentity(version, plus ? plus : "ESP32-C5");
+    rh.setSmooth(rhusb::kMaxSmoothMs);
     hostlink::setByteHandler(usbByte);
     esp_ota_img_states_t state;
     onTrial = esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
@@ -419,13 +420,17 @@ void console(char* args) {
         rh.setReject(r);
         hostlink::say("node reject: rise %u ms, hold %u ms, quiet %u ms, margin %u%s\n", r.riseMs, r.holdMs,
                       r.quietMs, r.margin, r.riseMs ? "" : " (off)");
+    } else if (!strcmp(sub, "smooth")) {
+        // RH over USB: median window before crossing detection (see rhusb::kMaxSmoothMs).
+        if (rest) rh.setSmooth((unsigned)atoi(rest));
+        hostlink::say("node smooth: %u ms median%s\n", rh.smooth(), rh.smooth() ? "" : " (off)");
     } else if (!strcmp(sub, "cmd") && rest) {
         // Commands as if from the S3 (unframed payloads, ';' between them,
         // handled back to back like F then G on the UART), for bench tests.
         isActive = true;
         for (char* p = strtok(rest, ";"); p; p = strtok(nullptr, ";")) core->handle(p, nowUs());
     } else {
-        hostlink::say("node [on|off|echo on|off|map <dBlo> <dBhi>|alpha A|reject [rise hold quiet margin]|cmd <F,MHz|G,n|Q>]\n");
+        hostlink::say("node [on|off|echo on|off|map <dBlo> <dBhi>|alpha A|reject [rise hold quiet margin]|smooth [ms]|cmd <F,MHz|G,n|Q>]\n");
     }
 }
 

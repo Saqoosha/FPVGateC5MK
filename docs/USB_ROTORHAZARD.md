@@ -58,8 +58,17 @@ actually want its extra race seats. The direct C5 does not use the plugin.
   frequency write RH runs API 36's register test, which passes when the seat is
   on a supported frequency.
 - RSSI is the existing C5 node-filter output divided by four, clamped to RH's
-  valid range 1-254. This does not add Widscan58's 255 ms median filter. Calibrate
-  this mode rather than assuming thresholds from a different receiver transfer.
+  valid range 1-254, then smoothed as RH's own nodes do: samples are averaged
+  per millisecond and those values go through a running median of the last
+  255 ms. In flight the per-capture level drops 10-20 dB for a few ms at a time
+  (multipath, the quad's attitude), so without it a pass crossed ExitAt and
+  EnterAt several times: on one recorded flight the gap between the lowest
+  gate peak and the highest level elsewhere on the track went from 14 to 29
+  RH levels (about 3.5 to 7 dB). Crossing detection, the RSSI RH shows and its history all use the
+  smoothed level, so a pass is timed about 128 ms late, the same for every
+  pass. `node smooth <ms>` (0 to 255, 0 = off) changes the window until the C5
+  restarts. Calibrate this mode rather than assuming thresholds from a
+  different receiver transfer.
 - EnterAt/ExitAt hysteresis and peak-plateau timing run on every successful
   capture. Pass timestamps use the plateau midpoint on the C5 clock, reported
   as milliseconds since the pass. USB polling delay is not added to that age;

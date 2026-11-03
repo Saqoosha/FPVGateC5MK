@@ -21,6 +21,15 @@ constexpr uint32_t kShowBucketMs = 25;
 // it about every 100 ms and a fast pass can be over EnterAt for less.
 constexpr uint32_t kShowCrossingMs = 250;
 
+// Optional smoothing before crossing detection, like RotorHazard's own nodes
+// (a 255-sample median at 1 kHz): samples are averaged per millisecond, and
+// each millisecond's value goes through a running median of the last
+// smoothMs of them. In flight the C5's per-capture level drops 10-20 dB for a
+// few ms at a time (multipath, the quad's attitude), so without it a pass
+// crosses ExitAt and EnterAt several times. Counting milliseconds keeps the
+// window the same however many seats are scanned. 0 turns it off.
+constexpr unsigned kMaxSmoothMs = 255;
+
 // A VTX powering on or changing channel jumps off the noise floor in a few
 // ms; a quad flying in needs hundreds of ms to rise that far. Such a jump is
 // hidden from RH (RSSI, history, NodePeak and crossing) for holdMs and dropped
@@ -66,6 +75,9 @@ public:
     // 0 for riseMs turns the rejection off.
     void setReject(const Reject& reject) { reject_ = reject; }
     const Reject& reject() const { return reject_; }
+    // Median window in ms, 0 (off) to kMaxSmoothMs; restarts every seat's window.
+    void setSmooth(unsigned ms);
+    unsigned smooth() const { return smoothMs_; }
 
 private:
     struct Seat {
@@ -97,9 +109,16 @@ private:
         // A pass that ended, still shown as crossing until shownUntilMs.
         bool shownCrossing = false;
         uint32_t shownUntilMs = 0;
+        // Smoothing (see kMaxSmoothMs): the millisecond being summed, then the
+        // last 'count' millisecond values, oldest at 'head', and the same values sorted.
+        bool binOpen = false;
+        uint32_t binMs = 0, binSum = 0, binN = 0, lastBinMs = 0;
+        uint8_t ring[kMaxSmoothMs] = {}, sorted[kMaxSmoothMs] = {};
+        uint8_t count = 0, head = 0;
     } seats_[kSeats];
     Port& port_;
     Reject reject_;
+    unsigned smoothMs_ = 0;
     uint8_t selected_ = 0, command_ = 0, needed_ = 0, received_ = 0;
     uint8_t input_[3] = {}, stats_[16] = {};
     uint32_t lastByteMs_ = 0, lastCommandMs_ = 0;
@@ -109,6 +128,11 @@ private:
     void reply(const uint8_t* data, size_t size);
     void latchStats(uint32_t nowMs);
     void settleAll(uint32_t nowMs);
+    // One level, smoothed or not, at its time: detection and what RH sees.
+    void process(Seat& seat, uint8_t level, uint32_t sampleMs);
+    // Adds a millisecond value to the seat's window and returns the median.
+    uint8_t smoothPush(Seat& seat, uint8_t level);
+    static void smoothReset(Seat& seat) { seat.binOpen = false; seat.count = seat.head = 0; }
     static uint8_t shownRssi(const Seat& seat, uint32_t nowMs);
     // A level for RH's RSSI and history, sampled from firstMs to lastMs.
     static void show(Seat& seat, uint8_t level, uint32_t firstMs, uint32_t lastMs);
