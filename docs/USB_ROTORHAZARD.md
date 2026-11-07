@@ -3,9 +3,9 @@
 Firmware `1.2.0` and later exposes eight native RotorHazard serial
 nodes over the C5's USB port. It needs no S3, Wi-Fi connection, FPVGate plugin
 or split-timer/Sensor Tuning PR. Software tests pass and native USB discovery
-has been verified on a Waveshare C5-Zero, with timing reported working in
-local RH testing. XIAO USB, multi-pilot RF detection and timing accuracy
-against video still need validation.
+has been verified on a Waveshare C5-Zero and a Seeed XIAO ESP32-C5, with
+timing tested with one quad (see the field test below). Multi-pilot RF
+detection and timing accuracy against video still need validation.
 
 ## Setup
 
@@ -174,7 +174,54 @@ defaults.
 
   The median removes the multipath dips inside a pass and also short peaks
   elsewhere on the track, which a merge window cannot, so it widens the range
-  of working thresholds. One flight only; more recordings are needed.
+  of working thresholds.
+- The median build was flown outdoors on 2026-11-07 with one quad on F1, the
+  C5 beside an RX5808 node on the same RH: five races, 42 passes. RH read both
+  receivers in races 1-3. In races 4-5 it read only the RX5808 while the C5
+  recorded raw samples, replayed through the firmware's detection afterwards.
+
+  | | RX5808 | C5 |
+  |---|---|---|
+  | Passes timed | 41 of 42 | 42 of 42 |
+  | Extra laps | 0 | 0 |
+  | Lowest pass peak, races 1-3 | 102 | 119 |
+  | Highest level away from passes, races 1-3 | 95 | 84 |
+
+  The RSSI scales differ, so compare each column with itself: the gap between
+  lowest peak and highest other level, divided by the full range, was 0.15-0.29
+  on the RX5808 and 0.29-0.51 on the C5. The RX5808's miss was a peak of 102
+  under EnterAt 107; at 100/90 it timed the other 35. The C5 stayed at 105/90.
+  Neither receiver can be called more accurate, as there was no reference. In
+  races 1-3 the C5 was earlier on 20 of 22 passes, by 31 ms on average, and
+  lap times differed by 16-23 ms on average per race, 70 ms at most. In races
+  4-5 the two clocks were matched only through the host's wall clock, so only
+  the spread counts: one pass in race 4 differed by 106 ms and a lap by 138 ms.
+  Race 2's pass differences fell into two clusters, near 0 and near -60 ms. No
+  other race showed that, and the cause is unknown. It was not peak splitting:
+  race 5's split peaks differed from the RX5808 by no more than other passes.
+
+  In the raw samples a pass rises for about a second, usually dips 4-13 dB
+  just before the peak, has a peak 43-170 ms wide at -6 dB and then falls
+  steeply. The peak is narrower than the window, so the median tops out 16-59
+  levels (4-15 dB) under it: 118-151 against 164-187 raw. No pass was lost, but
+  the lowest was only 13 above EnterAt 105. A faster course may need a shorter
+  median. Replaying other lengths gave these EnterAt values (ExitAt 15 below)
+  timing every pass with no extras, and recalculated laps within 1 ms of live:
+
+  | Median | Field, races 4 and 5 | Indoor flight above |
+  |---|---|---|
+  | 255 ms | 90-115 | 105-120 |
+  | 191 ms | 95, 105-120 | 110-120 |
+  | 127 ms | 105-140 | 120 |
+  | 95 ms | 105-145 | 120 |
+  | 63 ms | 110-150 | 120, 125 |
+
+  Shorter medians suit the field and not the indoor flight, whose dips are
+  deeper, so 255 ms stays the default. The indoor reference times came from
+  the 255 ms replay, which favours it. With no median, no EnterAt timed the
+  field races without extras. The dip is no use as a timing mark: it came
+  98-392 ms before the fall. Timing from the fall itself was inconclusive (17
+  laps, no reference).
 - With a merge set (1.2.4-rc.1's default, 300 ms; off in the median build), a
   pass ends only once the level has stayed under ExitAt for that long. A quad
   passing a gate in a small room dips under ExitAt and back (multipath); back
