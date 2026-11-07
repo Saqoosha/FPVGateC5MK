@@ -218,10 +218,25 @@ defaults.
 
   Shorter medians suit the field and not the indoor flight, whose dips are
   deeper, so 255 ms stays the default. The indoor reference times came from
-  the 255 ms replay, which favours it. With no median, no EnterAt timed the
-  field races without extras. The dip is no use as a timing mark: it came
-  98-392 ms before the fall. Timing from the fall itself was inconclusive (17
-  laps, no reference).
+  the 255 ms replay, which favours it.
+
+  The median is not better everywhere. The same replay of races 4 and 5, with
+  the same test, through the released detection (1.2.6's `rh_usb` is the same
+  as 1.2.4-rc.1's):
+
+  | Detection | EnterAt that worked | Detected at EnterAt 115 (7 and 12 real) |
+  |---|---|---|
+  | 1.2.3 (no merge, no median) | none | 11 and 23 |
+  | 1.2.6 (merge 300, no median) | 110-165 | 7 and 12 |
+  | This build (median 255, merge 0) | 90-115 | 7 and 12 |
+
+  Outdoors the median lowers the bottom of the range by 20, and because it
+  cuts the peak it takes 50 off the top, so 1.2.6 has the wider range here.
+  The indoor flight went the other way (table above). 1.2.6 was replayed, not
+  flown.
+
+  The dip is no use as a timing mark: it came 98-392 ms before the fall.
+  Timing from the fall itself was inconclusive (17 laps, no reference).
 - With a merge set (1.2.4-rc.1's default, 300 ms; off in the median build), a
   pass ends only once the level has stayed under ExitAt for that long. A quad
   passing a gate in a small room dips under ExitAt and back (multipath); back
